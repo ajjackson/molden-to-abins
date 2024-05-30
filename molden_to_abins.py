@@ -7,7 +7,7 @@ from pathlib import Path
 import re
 from typing import Dict, List, Literal, Tuple, TypedDict
 
-from ase.data import atomic_masses
+from ase.data import atomic_masses, chemical_symbols
 from ase.units import Bohr
 import numpy as np
 
@@ -63,25 +63,21 @@ class AtomData(TypedDict):
 
 
 def parse_atoms_data(raw_data: Dict[str, List[str]]) -> Dict[str, AtomData]:
-    if "[Atoms] AU" in raw_data:
-        raw_atom_lines = raw_data["[Atoms] AU"]
-        bohr_units = True
-    else:
-        raw_atom_lines = raw_data["[Atoms] Angs"]
-        bohr_units = False
+    """Get atomic positions from [FR-COORD] and convert to Angstrom"""
+    raw_atom_lines = raw_data["[FR-COORD]"]
 
     atoms_data = {
-        f"atom_{index - 1}": AtomData(
-            coord=coord, mass=atomic_masses[proton_number], sort=(index - 1), symbol=symbol
+        f"atom_{index}": AtomData(
+            coord=coord,
+            mass=atomic_masses[chemical_symbols.index(symbol)],
+            sort=(index),
+            symbol=symbol,
         )
-        for (symbol, index, proton_number, *coord) in map(
-            _parse_atom_line, raw_atom_lines
-        )
+        for index, (symbol, *coord) in enumerate(map(_parse_atom_line, raw_atom_lines))
     }
 
-    if bohr_units:
-        for atom_data in atoms_data.values():
-            atom_data["coord"] = _bohr_to_ang(atom_data["coord"])
+    for atom_data in atoms_data.values():
+        atom_data["coord"] = _bohr_to_ang(atom_data["coord"])
 
     return atoms_data
 
@@ -146,9 +142,9 @@ def _bohr_to_ang(coord: List[float]) -> List[float]:
     return [x * Bohr for x in coord]
 
 
-def _parse_atom_line(line: str) -> Tuple[str, int, int, float, float, float]:
-    symbol, index, proton_number, x, y, z = line.split()
-    return symbol, int(index), int(proton_number), float(x), float(y), float(z)
+def _parse_atom_line(line: str) -> Tuple[str, float, float, float]:
+    symbol, x, y, z = line.split()
+    return symbol, float(x), float(y), float(z)
 
 
 def main() -> None:
