@@ -11,6 +11,7 @@ from ase.data import atomic_masses, chemical_symbols
 from ase.units import Bohr
 import numpy as np
 
+
 def get_parser() -> ArgumentParser:
     parser = ArgumentParser()
     parser.add_argument("filename", type=Path, help="Input file in Molden format")
@@ -82,15 +83,20 @@ def parse_atoms_data(raw_data: Dict[str, List[str]]) -> Dict[str, AtomData]:
     return atoms_data
 
 
+AtomicDisplacements = List[List[List[List[float]]]]
+
+
 class KPointsData(TypedDict):
     frequencies: List[List[float]]
-    atomic_displacements: List[List[List[List[float]]]]
+    atomic_displacements: AtomicDisplacements
     weights: List[float]
     k_vectors: List[List[float]]
     unit_cell: List[List[float]]
 
 
-def _parse_displacements(raw_data: Dict[str, List[str]]) -> List[List[List[List[float]]]]:
+def _parse_displacements(
+    raw_data: Dict[str, List[str]]
+) -> List[List[List[List[float]]]]:
     """Get displacements into abins-friendly nested array format
 
     The array indices are (kpt, atom, mode, axis)
@@ -111,7 +117,7 @@ def _parse_displacements(raw_data: Dict[str, List[str]]) -> List[List[List[List[
         else:
             # Alternate values with 0. for imaginary component of eigenvector
             x, y, z = line.split()
-            current_mode_data.append([float(x), 0., float(y), 0., float(z), 0.])
+            current_mode_data.append([float(x), 0.0, float(y), 0.0, float(z), 0.0])
 
     modes_array.append(current_mode_data)
 
@@ -124,19 +130,58 @@ def _parse_displacements(raw_data: Dict[str, List[str]]) -> List[List[List[List[
 
     return modes_array.tolist()
 
+
+def normalise_displacements(
+    displacements: AtomicDisplacements, atoms_data: dict[str, AtomData]
+) -> AtomicDisplacements:
+    """Apply normalisation to Abins eigenvector convention"""
+
+    complex_disp = np.asarray(displacements).view(complex).copy()
+    masses = np.asarray(
+        [atoms_data[f"atom_{i}"]["mass"] for i in range(complex_disp.shape[1])],
+        dtype=float,
+    )
+
+    renormalised_complex_disp = _normalise_displacements(complex_disp, masses)
+    return renormalised_complex_disp.view(float).tolist()
+
+
+def _normalise_displacements(
+    displacements: np.ndarray, masses: np.ndarray
+) -> np.ndarray:
+    """Renormalise modes, like Abins GAUSSIAN loader"""
+
+    # Sum over squares of cartesian displacement directions
+    b_traces = np.einsum("ijkl,ijkl -> ijk", displacements, displacements)
+
+    # Multiply by masses and sum over atoms to obtain mode normalisation
+    norm = np.einsum("ijk, j->ik", b_traces, masses)
+
+    # Scale along mode and atom axes
+    displacements = np.einsum("ijkl,ik->ijkl", displacements, 1.0 / np.sqrt(norm))
+    displacements = np.einsum("ijkl,j->ijkl", displacements, np.sqrt(masses))
+
+    return displacements
+
+
 def parse_k_points_data(raw_data: Dict[str, List[str]]) -> KPointsData:
     # I think Molden uses recip. cm like Abins, but not obvious from docs
     frequencies = [list(map(float, raw_data["[FREQ]"]))]
 
     displacements = _parse_displacements(raw_data)
 
-    return KPointsData(k_vectors=[[0., 0., 0.]],
-                       unit_cell=[[0., 0., 0.],
-                                  [0., 0., 0.],
-                                  [0., 0., 0.]],
-                       weights=[1.],
-                       frequencies=frequencies,
-                       atomic_displacements=displacements)
+    return KPointsData(
+        k_vectors=[[0.0, 0.0, 0.0]],
+        unit_cell=[
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0],
+        ],
+        weights=[1.0],
+        frequencies=frequencies,
+        atomic_displacements=displacements,
+    )
+
 
 def _bohr_to_ang(coord: List[float]) -> List[float]:
     return [x * Bohr for x in coord]
@@ -157,6 +202,10 @@ def main() -> None:
 
     atoms_data = parse_atoms_data(raw_data)
     k_points_data = parse_k_points_data(raw_data)
+
+    k_points_data["atomic_displacements"] = normalise_displacements(
+        displacements=k_points_data["atomic_displacements"], atoms_data=atoms_data
+    )
 
     output_data = {
         "k_points_data": k_points_data,
